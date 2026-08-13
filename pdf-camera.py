@@ -69,6 +69,44 @@ def get_virtual_screen():
     )
 
 
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", _RECT),
+                ("rcWork", _RECT), ("dwFlags", wintypes.DWORD)]
+
+
+ctypes.windll.user32.MonitorFromPoint.argtypes = [_POINT, wintypes.DWORD]
+ctypes.windll.user32.MonitorFromPoint.restype = ctypes.c_void_p
+ctypes.windll.user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
+                                                 ctypes.POINTER(_MONITORINFO)]
+
+
+def get_cursor_monitor():
+    """マウスカーソルがあるモニタの (x, y, w, h) を返す。
+    案内文を仮想デスクトップの左上に固定すると、デュアルモニタでは
+    見ていない側の画面に出てしまうため、カーソル側に寄せる。"""
+    try:
+        pt = _POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        hmon = ctypes.windll.user32.MonitorFromPoint(pt, 2)  # NEAREST
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        if ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            r = mi.rcMonitor
+            return (r.left, r.top, r.right - r.left, r.bottom - r.top)
+    except Exception:
+        pass
+    return get_virtual_screen()
+
+
 # ============================================================
 # グローバルホットキー
 # keyboard ライブラリの低レベルフックはキーロガーと同じ仕組みのため、
@@ -180,7 +218,7 @@ def sanitize_filename(name, fallback="output"):
 class PDFCameraApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("PDF Camera + Capture")
+        self.root.title("Webカタログカメラ")
         self.root.geometry("520x760")
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -325,13 +363,19 @@ class PDFCameraApp:
                                 highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
-        # 案内文は黒帯の上に置く。地色のグレーに白文字を直接乗せると、
-        # alpha が効いた結果コントラストがほとんど残らない。
+        # 案内文はカーソルがあるモニタの上部中央に置く。
+        # 仮想デスクトップの左上に固定すると、デュアルモニタでは
+        # 見ていない側の画面に出てしまう。
+        mx, my, mw, _mh = get_cursor_monitor()
+        hint_cx = mx - vx + mw // 2
+        hint_cy = my - vy + 46
+
         hint = "ドラッグで範囲選択  →  [Enter] 確定  /  [Esc] 戻る"
-        tid = self.canvas.create_text(30, 28, text=hint, fill="#ffffff",
-                                      anchor="nw", font=HINT_FONT)
+        tid = self.canvas.create_text(hint_cx, hint_cy, text=hint,
+                                      fill="#ffffff", anchor="c",
+                                      font=HINT_FONT)
         x1, y1, x2, y2 = self.canvas.bbox(tid)
-        self.canvas.create_rectangle(x1 - 14, y1 - 10, x2 + 14, y2 + 10,
+        self.canvas.create_rectangle(x1 - 18, y1 - 12, x2 + 18, y2 + 12,
                                      fill="#000000", outline="#ffffff", width=1)
         self.canvas.tag_raise(tid)
 
@@ -553,19 +597,30 @@ class PDFCameraApp:
                                dpi=(out_dpi, out_dpi), optimize=True)
                     jpegs.append(dst)
 
-            layout_fun = img2pdf.get_layout_fun(
-                img2pdf.mm_to_pt(page_mm[0], page_mm[1]))
+            # mm_to_pt() は長さを1つだけ受け取る。
+            # 幅・高さそれぞれを変換してタプルで渡す。
+            page_pt = (img2pdf.mm_to_pt(page_mm[0]),
+                       img2pdf.mm_to_pt(page_mm[1]))
+            layout_fun = img2pdf.get_layout_fun(page_pt)
             with open(full_path, "wb") as f:
                 f.write(img2pdf.convert(jpegs, layout_fun=layout_fun))
 
             messagebox.showinfo(
                 "完了", f"PDF を作成しました（{len(jpegs)}ページ）:\n{full_path}")
+            self.cleanup_spool()
 
         except Exception as e:
-            messagebox.showerror("エラー", f"変換中にエラーが発生しました:\n{e}")
+            # 変換に失敗しても撮影済みの画像は消さない。
+            # カタログ1冊を撮り直させるのは論外なので、置き場所を伝えて残す。
+            kept = self.spool_dir
+            self.spool_dir = None
+            messagebox.showerror(
+                "エラー",
+                f"PDF への変換中にエラーが発生しました:\n{e}\n\n"
+                f"撮影した {len(pages)} 枚の画像は下記に残してあります。\n"
+                f"設定を変えて再実行するか、手動でPDF化してください。\n\n{kept}")
         finally:
             shutil.rmtree(jpeg_dir, ignore_errors=True)
-            self.cleanup_spool()
             self.root.deiconify()
 
     def cleanup_spool(self):
