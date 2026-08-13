@@ -188,6 +188,8 @@ class PDFCameraApp:
         self.save_dir = tk.StringVar(value=os.getcwd())
         self.file_name = tk.StringVar(value="output")
         self.resolution = tk.StringVar(value="300")
+        # 画面上のラベルは「見開き分割」。ON で見開きを左右2ページに割り、
+        # 出力はA4縦になる。OFF なら見開きのままA3横。
         self.is_single = tk.BooleanVar(value=False)
         self.gamma_val = tk.DoubleVar(value=1.0)
 
